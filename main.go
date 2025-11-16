@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"image/color"
 	"io/ioutil"
 	"log"
@@ -29,12 +30,35 @@ type Game struct {
 	targetText  string
 	targetLines []string
 	userText    string
+	currentPos  int
+	counter     Counter
+
+	allLines   []string
+	lineOffset int
 
 	hover      bool
 	hoverAlpha float64
 
 	fontBig   font.Face
 	fontSmall font.Face
+}
+
+type Counter struct {
+	allSignCounter   int
+	rightSignCounter int
+}
+
+func (c *Counter) incrementAllSignCounter() {
+	c.allSignCounter++
+}
+
+func (c *Counter) incrementRightSignCounter() {
+	c.rightSignCounter++
+}
+
+func (c *Counter) accuracyCalculation() int {
+	result := (c.rightSignCounter / c.allSignCounter) * 100
+	return result
 }
 
 func makeWordsSlice() []string {
@@ -155,6 +179,35 @@ func (g *Game) Update() error {
 			g.state = StateMenu
 		}
 
+		inputRunes := ebiten.InputChars()
+
+		if len(inputRunes) > 0 {
+			targetRunes := []rune(g.targetText)
+
+			if g.currentPos < len(targetRunes) {
+				exceptedRune := targetRunes[g.currentPos]
+				if inputRunes[0] == exceptedRune {
+					g.counter.incrementRightSignCounter()
+
+					g.currentPos++
+				}
+				g.counter.incrementAllSignCounter()
+			}
+
+			if g.currentPos >= len(targetRunes) {
+				g.lineOffset++
+
+				g.targetLines = g.allLines[g.lineOffset:min(g.lineOffset+3, len(g.allLines))]
+
+				if len(g.targetLines) > 0 {
+					g.targetText = g.targetLines[0]
+					g.currentPos = 0
+				} else {
+					g.state = StateResults
+				}
+			}
+		}
+
 	// ---------------- RESULTS ----------------
 	case StateResults:
 		if ebiten.IsKeyPressed(ebiten.KeyEnter) {
@@ -217,6 +270,10 @@ func (g *Game) drawTyping(screen *ebiten.Image) {
 
 	text.Draw(screen, "Ваш ввод:", g.fontSmall, 100, 340, color.White)
 	text.Draw(screen, g.userText, g.fontBig, 100, 360, color.White)
+
+	stats := fmt.Sprintf("Правильно: %d/%d", g.counter.rightSignCounter, g.counter.allSignCounter)
+	text.Draw(screen, stats, g.fontSmall, 100, 400, color.White)
+
 }
 
 func (g *Game) drawResults(screen *ebiten.Image) {
@@ -235,20 +292,27 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 // MAIN
 // ===============================
 
+// Вспомогательная функция для безопасного среза
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func main() {
 	s := makeWordsSlice()
-	resStr := makeStrings(s)
-
-	renderLines := make([]string, 0, 3)
-
-	for i := 0; i < 3; i++ {
-		renderLines = append(renderLines, resStr[i])
-	}
+	allLines := makeStrings(s)
 
 	game := &Game{
-		state:       StateMenu,
-		targetText:  resStr[0],
-		targetLines: renderLines,
+		state:      StateMenu,
+		allLines:   allLines,
+		lineOffset: 0,
+	}
+
+	game.targetLines = allLines[game.lineOffset:min(game.lineOffset+3, len(allLines))]
+	if len(game.targetLines) > 0 {
+		game.targetText = game.targetLines[0]
 	}
 
 	// Загружаем шрифты
@@ -261,4 +325,5 @@ func main() {
 	if err := ebiten.RunGame(game); err != nil {
 		log.Fatal(err)
 	}
+
 }
