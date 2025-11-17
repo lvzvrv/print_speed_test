@@ -22,6 +22,7 @@ type GameState int
 const (
 	StateMenu GameState = iota
 	StateTyping
+	StateStartTyping
 	StateResults
 )
 
@@ -32,9 +33,14 @@ type Game struct {
 	userText    string
 	currentPos  int
 	counter     Counter
+	myTimer     Timer
 
 	allLines   []string
 	lineOffset int
+
+	correctText string
+
+	currentResult Results
 
 	hover      bool
 	hoverAlpha float64
@@ -46,6 +52,7 @@ type Game struct {
 type Counter struct {
 	allSignCounter   int
 	rightSignCounter int
+	accuracy         float64
 }
 
 func (c *Counter) incrementAllSignCounter() {
@@ -56,9 +63,133 @@ func (c *Counter) incrementRightSignCounter() {
 	c.rightSignCounter++
 }
 
-func (c *Counter) accuracyCalculation() int {
-	result := (c.rightSignCounter / c.allSignCounter) * 100
-	return result
+func (c *Counter) calculateAccuracy() {
+	if c.allSignCounter == 0 {
+		c.accuracy = 0
+		return
+	}
+	c.accuracy = (float64(c.rightSignCounter) / float64(c.allSignCounter)) * 100
+}
+
+type Timer struct {
+	duration    time.Duration
+	startTime   time.Time
+	endTime     time.Time
+	isRunning   bool
+	remaining   time.Duration
+	timeElapsed time.Duration
+}
+
+func NewTimer(duration time.Duration) *Timer {
+	return &Timer{
+		duration:  duration,
+		remaining: duration,
+	}
+}
+
+func (t *Timer) Start() {
+	if t.isRunning {
+		fmt.Println("Таймер уже запущен!")
+		return
+	}
+
+	t.isRunning = true
+	t.startTime = time.Now()
+	t.endTime = t.startTime.Add(t.duration)
+	t.remaining = t.duration
+	t.timeElapsed = 0
+}
+
+func (t *Timer) Update() {
+	if !t.isRunning {
+		return
+	}
+
+	now := time.Now()
+	t.timeElapsed = now.Sub(t.startTime)
+	t.remaining = t.duration - t.timeElapsed
+
+	if t.remaining <= 0 {
+		t.remaining = 0
+		t.isRunning = false
+	}
+}
+
+func (t *Timer) GetRemainingFormatted() string {
+	if t.remaining <= 0 {
+		return "00:00"
+	}
+
+	totalSeconds := int(t.remaining.Round(time.Second).Seconds())
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
+}
+
+func (t *Timer) GetTimeElapsed() time.Duration {
+	return t.timeElapsed
+}
+
+func (t *Timer) Stop() {
+	t.isRunning = false
+}
+
+func (t *Timer) IsFinished() bool {
+	return t.remaining <= 0
+}
+
+func (t *Timer) IsRunning() bool {
+	return t.isRunning
+}
+
+type Results struct {
+	TypingSpeed int     `json:"typingSpeed"`
+	Accuracy    float64 `json:"accuracy"`
+	Timestamp   string  `json:"timestamp"`
+}
+
+// Функция для загрузки текущего лучшего результата
+func loadBestResult(filename string) (Results, error) {
+	var bestResult Results
+
+	file, err := os.ReadFile(filename)
+	if err != nil {
+		// Если файла нет, возвращаем пустой результат
+		if os.IsNotExist(err) {
+			return Results{}, nil
+		}
+		return Results{}, err
+	}
+
+	err = json.Unmarshal(file, &bestResult)
+	if err != nil {
+		return Results{}, err
+	}
+
+	return bestResult, nil
+}
+
+// Простая версия - сравниваем по "очкам" (скорость × точность)
+func saveIfBetterSimple(newResult Results, filename string) error {
+	bestResult, err := loadBestResult(filename)
+	if err != nil {
+		return err
+	}
+
+	// Вычисляем "очки" для сравнения
+	newScore := float64(newResult.TypingSpeed) * (newResult.Accuracy / 100)
+	bestScore := float64(bestResult.TypingSpeed) * (bestResult.Accuracy / 100)
+
+	// Если новый результат лучше ИЛИ это первый результат
+	if newScore > bestScore || (bestResult.TypingSpeed == 0 && bestResult.Accuracy == 0) {
+		data, err := json.MarshalIndent(newResult, "", "  ")
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filename, data, 0644)
+	}
+
+	return nil
 }
 
 func makeWordsSlice() []string {
@@ -129,6 +260,45 @@ func loadFont(path string, size float64) font.Face {
 	return face
 }
 
+func (g *Game) drawBestResult() string {
+	best, err := loadBestResult("best_result.json")
+	if err != nil {
+		return ""
+	}
+
+	if best.TypingSpeed > 0 {
+		bestText := fmt.Sprintf("Лучший результат:\nСкорость печати: %d зн/мин\nТочность: %.2f%%",
+			best.TypingSpeed, best.Accuracy)
+		return bestText
+	}
+	return ""
+}
+
+func (g *Game) drawCurrentResult() string {
+	results := fmt.Sprintf("Текущий результат:\nСкорость печати: %d зн/мин\nТочность: %.2f%%",
+		g.currentResult.TypingSpeed,
+		g.currentResult.Accuracy)
+
+	return results
+}
+
+func (g *Game) resetGame() {
+	// Просто пересоздаем все данные как в main()
+	s := makeWordsSlice()
+	g.allLines = makeStrings(s)
+	g.lineOffset = 0
+	g.currentPos = 0
+	g.correctText = ""
+	g.userText = ""
+	g.counter = Counter{}
+	g.currentResult = Results{}
+	g.targetLines = g.allLines[g.lineOffset:min(g.lineOffset+3, len(g.allLines))]
+	if len(g.targetLines) > 0 {
+		g.targetText = g.targetLines[0]
+	}
+	g.myTimer = Timer{}
+}
+
 // ===============================
 // UPDATE
 // ===============================
@@ -165,18 +335,49 @@ func (g *Game) Update() error {
 			g.startTyping()
 		}
 
-		// ENTER
-		if ebiten.IsKeyPressed(ebiten.KeyEnter) {
-			g.startTyping()
-		}
-
 	// ---------------- TYPING ----------------
 	case StateTyping:
 
-		// Здесь позже добавим обработку клавиш
 		// Сейчас ESC возвращает в меню
 		if ebiten.IsKeyPressed(ebiten.KeyEscape) {
 			g.state = StateMenu
+		}
+
+		// Обработка Enter -> StateStartTyping
+		if ebiten.IsKeyPressed(ebiten.KeyEnter) {
+			g.resetGame() // Сбрасываем игру перед началом таймера
+			g.myTimer = *NewTimer(60 * time.Second)
+			g.myTimer.Start()
+			g.state = StateStartTyping
+		}
+
+	// ----------------Start_Typing ----------------
+	case StateStartTyping:
+		// Обновляем таймер
+		g.myTimer.Update()
+
+		if g.myTimer.IsFinished() {
+			var accuracy float64
+			if g.counter.allSignCounter > 0 {
+				accuracy = (float64(g.counter.rightSignCounter) / float64(g.counter.allSignCounter)) * 100
+			}
+
+			g.currentResult = Results{
+				TypingSpeed: g.counter.rightSignCounter,
+				Accuracy:    accuracy,
+				Timestamp:   time.Now().Format("2006-01-02 15:04:05"),
+			}
+
+			// Сохраняем только если результат лучше
+			if err := saveIfBetterSimple(g.currentResult, "best_result.json"); err != nil {
+				fmt.Printf("Ошибка сохранения: %v\n", err)
+			} else {
+				// Можно показать сообщение, что это новый рекорд
+				fmt.Println("Новый рекорд!")
+			}
+
+			g.state = StateResults
+			break
 		}
 
 		inputRunes := ebiten.InputChars()
@@ -188,13 +389,17 @@ func (g *Game) Update() error {
 				exceptedRune := targetRunes[g.currentPos]
 				if inputRunes[0] == exceptedRune {
 					g.counter.incrementRightSignCounter()
-
+					g.correctText += string(exceptedRune)
+					g.userText = string(inputRunes)
 					g.currentPos++
+				} else {
+					g.userText = string(inputRunes)
 				}
-				g.counter.incrementAllSignCounter()
+				g.counter.incrementAllSignCounter() // Всегда увеличиваем общий счетчик
 			}
 
 			if g.currentPos >= len(targetRunes) {
+				g.correctText = ""
 				g.lineOffset++
 
 				g.targetLines = g.allLines[g.lineOffset:min(g.lineOffset+3, len(g.allLines))]
@@ -235,6 +440,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		g.drawMenu(screen)
 	case StateTyping:
 		g.drawTyping(screen)
+	case StateStartTyping:
+		g.drawStartTyping(screen)
 	case StateResults:
 		g.drawResults(screen)
 	}
@@ -242,7 +449,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 func (g *Game) drawMenu(screen *ebiten.Image) {
 	text.Draw(screen, "Тест скорости печати", g.fontBig, 275, 180, color.White)
-	text.Draw(screen, "Нажмите кнопку или Enter для старта", g.fontSmall, 250, 230, color.White)
 
 	startX, startY := 325, 280
 	startW, startH := 150, 50
@@ -253,11 +459,17 @@ func (g *Game) drawMenu(screen *ebiten.Image) {
 
 	ebitenutil.DrawRect(screen, float64(startX), float64(startY), float64(startW), float64(startH), btnColor)
 	text.Draw(screen, "СТАРТ", g.fontBig, startX+35, startY+33, color.White)
+
 }
 
 func (g *Game) drawTyping(screen *ebiten.Image) {
-	text.Draw(screen, "Режим печати (ESC — выход)", g.fontSmall, 260, 80, color.White)
+	text.Draw(screen, "Нажмите Enter чтобы начать", g.fontBig, 240, 300, color.White)
+	text.Draw(screen, "ESC — выход", g.fontSmall, 350, 340, color.White)
+	text.Draw(screen, "01:00", g.fontBig, 370, 500, color.White)
 
+}
+
+func (g *Game) drawStartTyping(screen *ebiten.Image) {
 	text.Draw(screen, "Текст:", g.fontSmall, 100, 200, color.White)
 
 	baseY := 240
@@ -274,10 +486,23 @@ func (g *Game) drawTyping(screen *ebiten.Image) {
 	stats := fmt.Sprintf("Правильно: %d/%d", g.counter.rightSignCounter, g.counter.allSignCounter)
 	text.Draw(screen, stats, g.fontSmall, 100, 400, color.White)
 
+	text.Draw(screen, g.correctText, g.fontBig, 100, 240, color.RGBA{32, 235, 45, 255})
+
+	// Отображение оставшегося времени
+	timeText := fmt.Sprintf("%s", g.myTimer.GetRemainingFormatted())
+	text.Draw(screen, timeText, g.fontBig, 370, 500, color.White)
 }
 
 func (g *Game) drawResults(screen *ebiten.Image) {
-	text.Draw(screen, "Результаты (Enter — в меню)", g.fontBig, 200, 200, color.White)
+	text.Draw(screen, "Нажмите Enter для выхода в меню", g.fontSmall, 250, 500, color.White)
+
+	// Вывод результата текущей попытки
+	results := g.drawCurrentResult()
+	text.Draw(screen, results, g.fontBig, 10, 240, color.White)
+
+	// Вывод рекорда
+	res := g.drawBestResult()
+	text.Draw(screen, res, g.fontBig, 450, 240, color.White)
 }
 
 // ===============================
@@ -305,9 +530,10 @@ func main() {
 	allLines := makeStrings(s)
 
 	game := &Game{
-		state:      StateMenu,
-		allLines:   allLines,
-		lineOffset: 0,
+		state:       StateMenu,
+		allLines:    allLines,
+		lineOffset:  0,
+		correctText: "",
 	}
 
 	game.targetLines = allLines[game.lineOffset:min(game.lineOffset+3, len(allLines))]
